@@ -1,0 +1,21 @@
+=== CAFE DATA CLEANING REPORT ===
+Input rows: 2644
+
+Fixed 0 phone numbers with a stray leading apostrophe.
+Removed 0 malformed website URL(s) that couldn't be parsed (e.g. backslash paths).
+
+Found 0 rows forming 0 duplicate pairs/groups (same name + identical coordinates, sourced from OSM and/or Geoapify twice).
+  -> 0 of those groups have conflicting region_id values (flagged, not auto-merged blindly; first non-null kept).
+
+Rows before de-duplication: 2644
+Rows after de-duplication:  2644
+Rows removed:               0
+
+Remaining missing-data snapshot (post-clean):
+  address: 82 missing / 2644 (3%)
+  phone: 731 missing / 2644 (28%)
+  website: 1153 missing / 2644 (44%)
+  email: 2296 missing / 2644 (87%)
+  ai_summary: 2030 missing / 2644 (77%)
+
+Cleaned file saved to: cafes_cleaned.csv

@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>CoffAI Lead Engine</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+<style>
+  :root { --ink:#1c1410; --paper:#faf6f0; --accent:#6f4e37; --line:#e4d9cc; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:var(--paper); color:var(--ink); margin:0; padding:24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  p.sub { color:#7a6f64; margin-top:0; margin-bottom:20px; font-size:14px; }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:20px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  input, select { padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
+  button { background:var(--accent); color:#fff; border:none; padding:9px 16px; border-radius:6px; cursor:pointer; font-size:14px; }
+  button:disabled { opacity:0.5; cursor:default; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  table { width:100%; border-collapse: collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:#7a6f64; font-weight:600; }
+  .tag { display:inline-block; background:#f1e8dd; color:#6f4e37; border-radius:12px; padding:2px 8px; margin:2px 4px 2px 0; font-size:11px; }
+  .score { font-weight:600; }
+  .score-high { color:#2e7d32; }
+  .score-mid { color:#b8860b; }
+  .score-low { color:#a33; }
+  .msg-box { margin-top:6px; font-size:12px; background:#f8f4ee; border:1px dashed var(--line); padding:8px; border-radius:6px; white-space:pre-wrap; }
+  a { color:var(--accent); }
+  #status { font-size:13px; color:#7a6f64; margin-top:8px; }
+  #map { height: 460px; border-radius: 8px; border: 1px solid var(--line); margin-top: 10px; }
+  .hint { font-size:12px; color:#999; margin:6px 0 0; }
+  .bbox-readout { font-size:12px; color:#7a6f64; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+
+<h1>☕ CoffAI Lead Engine</h1>
+<p class="sub">Draw a box on the map, scan it: pulls every café inside, infers operational problems with AI, saves to the DB. Messaging stays manual.</p>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:6px;">
+    <input id="label" placeholder="Label this area (optional, e.g. 'Downtown Tunis')" style="flex:1; min-width:220px;" />
+    <input id="maxResults" type="number" min="1" max="300" placeholder="Max cafés (default 100)" style="width:180px;" />
+    <button id="scanBtn" disabled>Scan drawn area</button>
+    <button class="ghost" id="clearBtn">Clear box</button>
+  </div>
+  <div id="map"></div>
+  <p class="hint">Use the rectangle tool (top-left of the map) to draw a box, then hit "Scan drawn area". Boxes larger than ~3° a side are rejected — draw a few smaller boxes to cover a big region instead of one huge one.</p>
+  <div class="bbox-readout" id="bboxReadout"></div>
+  <div id="status"></div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <strong>🌍 Scan the world</strong>
+    <input id="worldCityLimit" type="number" min="1" placeholder="Cities (default all ~30)" style="width:180px;" />
+    <input id="worldMaxPerCity" type="number" min="1" max="500" placeholder="Max per city (default 150)" style="width:180px;" />
+    <button id="worldScanBtn">Scan the world</button>
+  </div>
+  <p class="hint">Walks a curated list of cities across every continent. Only cafés with a phone/website/email/social AND a completed AI analysis get saved — this can take several minutes, don't close the tab.</p>
+  <div id="worldStatus"></div>
+</div>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:12px;">
+    <label>Filter by problem:</label>
+    <select id="categoryFilter">
+      <option value="">All</option>
+      <option value="owner_visibility">Owner visibility</option>
+      <option value="staff_comm">Staff communication</option>
+      <option value="payment_fragmentation">Payment fragmentation</option>
+      <option value="profit_visibility">Profit visibility</option>
+      <option value="delivery_dependence">Delivery dependence</option>
+      <option value="inventory_waste">Inventory / waste</option>
+      <option value="expensive_pos">Expensive / complex POS</option>
+    </select>
+    <label>Min openness:</label>
+    <select id="opennessFilter">
+      <option value="">Any</option>
+      <option value="3">3+</option>
+      <option value="4">4+</option>
+      <option value="5">5</option>
+    </select>
+    <label>Status:</label>
+    <select id="statusFilter">
+      <option value="new" selected>Not yet contacted</option>
+      <option value="contacted">Contacted</option>
+      <option value="all">All</option>
+    </select>
+    <button class="ghost" id="refreshBtn">Refresh table</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Cafe</th><th>Contact</th><th>Score</th><th>Hypothesized problems</th><th>Outreach</th>
+      </tr>
+    </thead>
+    <tbody id="cafeRows"></tbody>
+  </table>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script>
+const API = "http://localhost:8080/api";
+
+function scoreClass(n) {
+  if (n >= 4) return "score-high";
+  if (n >= 3) return "score-mid";
+  return "score-low";
+}
+
+// --- Map setup ---
+const map = L.map("map").setView([20, 10], 2); // world view by default
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "&copy; OpenStreetMap contributors",
+  maxZoom: 19,
+}).addTo(map);
+
+const drawnItems = new L.FeatureGroup();
+map.addLayer(drawnItems);
+
+const drawControl = new L.Control.Draw({
+  draw: {
+    rectangle: true,
+    polygon: false, circle: false, circlemarker: false, marker: false, polyline: false,
+  },
+  edit: { featureGroup: drawnItems, remove: false },
+});
+map.addControl(drawControl);
+
+const cafeMarkers = L.layerGroup().addTo(map);
+const pastRegionsLayer = L.layerGroup().addTo(map);
+
+let currentBbox = null;
+
+function updateBboxReadout() {
+  const el = document.getElementById("bboxReadout");
+  const btn = document.getElementById("scanBtn");
+  if (!currentBbox) {
+    el.textContent = "No area selected — draw a rectangle on the map.";
+    btn.disabled = true;
+    return;
+  }
+  const { south, west, north, east } = currentBbox;
+  el.textContent = `Box: south ${south.toFixed(4)}, west ${west.toFixed(4)}, north ${north.toFixed(4)}, east ${east.toFixed(4)}`;
+  btn.disabled = false;
+}
+
+map.on(L.Draw.Event.CREATED, (e) => {
+  drawnItems.clearLayers(); // only keep one box at a time
+  const layer = e.layer;
+  drawnItems.addLayer(layer);
+  const b = layer.getBounds();
+  currentBbox = { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
+  updateBboxReadout();
+});
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  drawnItems.clearLayers();
+  currentBbox = null;
+  updateBboxReadout();
+});
+
+function markerColor(openness) {
+  if (openness >= 4) return "#2e7d32";
+  if (openness >= 3) return "#b8860b";
+  if (openness) return "#a33";
+  return "#999";
+}
+
+function plotCafes(cafes) {
+  cafeMarkers.clearLayers();
+  cafes.forEach((c) => {
+    if (!c.lat || !c.lng) return;
+    L.circleMarker([c.lat, c.lng], {
+      radius: 6,
+      color: markerColor(c.openness_score),
+      fillColor: markerColor(c.openness_score),
+      fillOpacity: 0.85,
+    })
+      .bindPopup(`<strong>${c.name}</strong><br>Openness: ${c.openness_score ?? "—"}/5 · Pain: ${c.pain_score ?? "—"}/5`)
+      .addTo(cafeMarkers);
+  });
+}
+
+async function loadPastRegions() {
+  try {
+    const res = await fetch(`${API}/regions`);
+    const regions = await res.json();
+    pastRegionsLayer.clearLayers();
+    regions.forEach((r) => {
+      if (r.bbox_south == null) return;
+      L.rectangle(
+        [[r.bbox_south, r.bbox_west], [r.bbox_north, r.bbox_east]],
+        { color: "#6f4e37", weight: 1, fillOpacity: 0.03, dashArray: "4 4" }
+      )
+        .bindTooltip(`${r.label || r.city || "Scanned area"} (${r.cafe_count} cafés)`)
+        .addTo(pastRegionsLayer);
+    });
+  } catch (err) {
+    console.warn("Could not load past regions:", err.message);
+  }
+}
+
+async function scan() {
+  if (!currentBbox) return;
+  const label = document.getElementById("label").value.trim();
+  const maxResults = document.getElementById("maxResults").value;
+
+  const btn = document.getElementById("scanBtn");
+  btn.disabled = true;
+  const status = document.getElementById("status");
+  status.textContent = "Scanning drawn area, running AI analysis... this can take a while for a big box.";
+
+  try {
+    const res = await fetch(`${API}/scrape/area`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...currentBbox, label, maxResults: maxResults || undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Scan failed");
+    status.textContent = `Done — "${data.label}": found ${data.cafesFound}, saved ${data.cafesAnalyzed} full-detail leads, skipped ${data.cafesSkipped ?? 0} (no contact info or no AI analysis).`;
+    plotCafes(data.cafes || []);
+    loadCafes();
+    loadPastRegions();
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  } finally {
+    btn.disabled = !currentBbox;
+  }
+}
+
+async function scanWorld() {
+  const cityLimit = document.getElementById("worldCityLimit").value;
+  const maxResultsPerCity = document.getElementById("worldMaxPerCity").value;
+
+  const btn = document.getElementById("worldScanBtn");
+  btn.disabled = true;
+  const status = document.getElementById("worldStatus");
+  status.textContent = "Scanning cities across every continent... this can take several minutes, please wait.";
+
+  try {
+    const res = await fetch(`${API}/scrape/world`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cityLimit: cityLimit || undefined,
+        maxResultsPerCity: maxResultsPerCity || undefined,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "World scan failed");
+    status.textContent = `Done — scanned ${data.citiesScanned} cities, found ${data.totalFound}, saved ${data.totalAnalyzed} full-detail leads, skipped ${data.totalSkipped}.`;
+    loadCafes();
+    loadPastRegions();
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadCafes() {
+  const category = document.getElementById("categoryFilter").value;
+  const minOpenness = document.getElementById("opennessFilter").value;
+  const status = document.getElementById("statusFilter").value;
+  const params = new URLSearchParams();
+  if (category) params.set("category", category);
+  if (minOpenness) params.set("minOpenness", minOpenness);
+  params.set("status", status);
+
+  const res = await fetch(`${API}/cafes?${params.toString()}`);
+  const cafes = await res.json();
+
+  plotCafes(cafes);
+
+  const tbody = document.getElementById("cafeRows");
+  tbody.innerHTML = "";
+
+  cafes.forEach((c) => {
+    const tr = document.createElement("tr");
+
+    const contactBits = [];
+    if (c.phone) contactBits.push(c.phone);
+    if (c.website) contactBits.push(`<a href="${c.website}" target="_blank">website</a>`);
+    if (c.instagram_url) contactBits.push(`<a href="${c.instagram_url}" target="_blank">Instagram</a>`);
+    if (c.facebook_url) contactBits.push(`<a href="${c.facebook_url}" target="_blank">Facebook</a>`);
+    if (c.whatsapp_url) contactBits.push(`<a href="${c.whatsapp_url}" target="_blank">WhatsApp</a>`);
+    if (c.email) contactBits.push(c.email);
+
+    const problemsHtml = (c.problems || [])
+      .map((p) => `<span class="tag" title="${p.description}">${p.category.replace(/_/g, " ")}</span>`)
+      .join("");
+
+    tr.innerHTML = `
+      <td><strong>${c.name}</strong><br><span style="color:#999;font-size:11px;">${c.city || ""}${c.city && c.country_code ? ", " : ""}${c.country_code || ""}</span><br>
+          <span style="color:#999;font-size:11px;">${c.address || ""}</span></td>
+      <td>${contactBits.join("<br>") || "—"}</td>
+      <td>
+        <div class="score ${scoreClass(c.openness_score || 0)}">Openness: ${c.openness_score ?? "—"}/5</div>
+        <div class="score ${scoreClass(c.pain_score || 0)}">Pain: ${c.pain_score ?? "—"}/5</div>
+      </td>
+      <td>${problemsHtml || "—"}<br><span style="font-size:11px;color:#999;">${c.ai_summary || ""}</span></td>
+      <td>
+        ${
+          c.contacted_at
+            ? `<span style="color:#2e7d32;font-size:12px;">✅ Contacted</span><br><button class="ghost undo-btn" data-id="${c.id}" style="margin-top:4px;font-size:11px;padding:4px 8px;">Undo</button>`
+            : `<button class="ghost draft-btn" data-id="${c.id}">Draft message</button>
+               <div class="msg-box" id="msg-${c.id}" style="display:none;"></div>
+               <button id="sent-${c.id}" class="mark-sent-btn" data-id="${c.id}" style="display:none;margin-top:6px;">✅ Mark as sent</button>`
+        }
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  tbody.querySelectorAll(".draft-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-id");
+      const box = document.getElementById(`msg-${id}`);
+      box.style.display = "block";
+      box.textContent = "Generating...";
+      const res = await fetch(`${API}/cafes/${id}/message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: "English" }),
+      });
+      const data = await res.json();
+      box.textContent = data.message || data.error;
+      if (data.message) {
+        const sentBtn = document.getElementById(`sent-${id}`);
+        if (sentBtn) sentBtn.style.display = "inline-block";
+      }
+    });
+  });
+
+  tbody.querySelectorAll(".mark-sent-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-id");
+      btn.disabled = true;
+      btn.textContent = "Marking...";
+      await fetch(`${API}/cafes/${id}/contacted`, { method: "POST" });
+      loadCafes(); // row disappears from the default "Not yet contacted" view
+    });
+  });
+
+  tbody.querySelectorAll(".undo-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-id");
+      await fetch(`${API}/cafes/${id}/uncontacted`, { method: "POST" });
+      loadCafes();
+    });
+  });
+}
+
+document.getElementById("scanBtn").addEventListener("click", scan);
+document.getElementById("worldScanBtn").addEventListener("click", scanWorld);
+document.getElementById("refreshBtn").addEventListener("click", loadCafes);
+document.getElementById("categoryFilter").addEventListener("change", loadCafes);
+document.getElementById("opennessFilter").addEventListener("change", loadCafes);
+document.getElementById("statusFilter").addEventListener("change", loadCafes);
+
+updateBboxReadout();
+loadPastRegions();
+loadCafes();
+</script>
+</body>
+</html>
