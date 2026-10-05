@@ -552,11 +552,3 @@ The engine answers:
 It does not pretend to answer:
 
 > **"Which cafés definitely need my software?"**
-
----
-
-# 📄 License
-
-Add your preferred license here.
-
-If this repository is private, you can simply remove this section.
